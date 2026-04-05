@@ -1051,6 +1051,8 @@ pub trait ExtensionExpr: std::fmt::Debug + Send + Sync {
     fn value_type(&self) -> ValueType;
 
     fn children(&self) -> &[Expr];
+
+    fn children_mut(&mut self) -> &mut [Expr];
 }
 
 impl PartialEq for Extension {
