@@ -15,7 +15,6 @@
 use crate::parser::{
     AggregateExpr, BinaryExpr, Expr, Extension, ParenExpr, SubqueryExpr, UnaryExpr,
 };
-use std::sync::Arc;
 
 /// Trait that implements the [Visitor pattern](https://en.wikipedia.org/wiki/Visitor_pattern)
 /// for a depth first walk on [Expr] AST. [`pre_visit`](ExprVisitor::pre_visit) is called
@@ -124,16 +123,13 @@ pub fn walk_expr_mut<V: ExprVisitorMut>(
         Expr::Paren(ParenExpr { expr }) => walk_expr_mut(visitor, expr)?,
         Expr::Subquery(SubqueryExpr { expr, .. }) => walk_expr_mut(visitor, expr)?,
         Expr::Extension(Extension { expr }) => {
-            // We can only safely traverse and mutate the extension's children
-            // if this is the only reference to the Arc. Otherwise, we safely
-            // fall back to treating it as a leaf node.
-            if let Some(ext_expr) = Arc::get_mut(expr) {
-                for child in ext_expr.children_mut() {
-                    if !walk_expr_mut(visitor, child)? {
-                        return Ok(false);
-                    }
+            let mut children = expr.children().to_vec();
+            for child in &mut children {
+                if !walk_expr_mut(visitor, child)? {
+                    return Ok(false);
                 }
             }
+            *expr = expr.with_new_children(children);
             true
         }
         Expr::Call(call) => {
@@ -169,6 +165,7 @@ mod tests {
     use crate::parser::ast::ExtensionExpr;
     use crate::parser::value::ValueType;
     use crate::parser::VectorSelector;
+    use std::sync::Arc;
 
     struct NamespaceVisitor {
         namespace: String,
@@ -429,53 +426,20 @@ mod tests {
         fn children(&self) -> &[Expr] {
             &self.children
         }
-        fn children_mut(&mut self) -> &mut [Expr] {
-            &mut self.children
+        fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr> {
+            Arc::new(DummyExtension { children })
         }
     }
 
     #[test]
-    fn test_inject_label_into_unshared_extension() {
-        let inner_expr = parser::parse("pg_stat_activity_count{}").unwrap();
-        let dummy_ext = DummyExtension {
-            children: vec![inner_expr],
-        };
-
-        let unique_arc = std::sync::Arc::new(dummy_ext);
-
-        let mut ast = Expr::Extension(parser::Extension { expr: unique_arc });
-
-        let mut visitor = LabelInjectorVisitor {
-            label_name: "env".to_string(),
-            label_value: "prod".to_string(),
-        };
-        assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
-
-        // Because the Arc was uniquely owned, `get_mut` succeeded, the extension's
-        // children were traversed, and the inner selector was mutated.
-        if let Expr::Extension(ext) = &ast {
-            let children = ext.expr.children();
-            assert_eq!(children.len(), 1);
-            if let Expr::VectorSelector(vs) = &children[0] {
-                assert_eq!(vs.matchers.matchers.len(), 1);
-                assert_eq!(vs.matchers.matchers[0].name, "env");
-                assert_eq!(vs.matchers.matchers[0].value, "prod");
-            } else {
-                panic!("expected inner expression to be a VectorSelector");
-            }
-        } else {
-            panic!("expected Extension expression");
-        }
-    }
-
-    #[test]
-    fn test_skip_shared_extension() {
+    fn test_inject_label_into_extension() {
         let inner_expr = parser::parse("pg_stat_activity_count{}").unwrap();
         let dummy_ext = DummyExtension {
             children: vec![inner_expr],
         };
 
         let shared_arc = std::sync::Arc::new(dummy_ext);
+        // Clone the Arc to simulate multiple references to the same extension expression.
         let _second_reference = std::sync::Arc::clone(&shared_arc);
 
         let mut ast = Expr::Extension(parser::Extension { expr: shared_arc });
@@ -486,16 +450,14 @@ mod tests {
         };
         assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
 
-        // Because the Arc was shared, `get_mut` failed, the extension was
-        // treated as a leaf node, and the inner selector was NOT mutated.
+        // The extension's children should be traversed and mutated like any other expression.
         if let Expr::Extension(ext) = &ast {
             let children = ext.expr.children();
             assert_eq!(children.len(), 1);
             if let Expr::VectorSelector(vs) = &children[0] {
-                assert!(
-                    vs.matchers.matchers.is_empty(),
-                    "inner VectorSelector should not have been mutated"
-                );
+                assert_eq!(vs.matchers.matchers.len(), 1);
+                assert_eq!(vs.matchers.matchers[0].name, "env");
+                assert_eq!(vs.matchers.matchers[0].value, "prod");
             } else {
                 panic!("expected inner expression to be a VectorSelector");
             }

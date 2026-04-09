@@ -1052,7 +1052,7 @@ pub trait ExtensionExpr: std::fmt::Debug + Send + Sync {
 
     fn children(&self) -> &[Expr];
 
-    fn children_mut(&mut self) -> &mut [Expr];
+    fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr>;
 }
 
 impl PartialEq for Extension {
