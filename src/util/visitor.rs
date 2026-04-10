@@ -124,13 +124,15 @@ pub fn walk_expr_mut<V: ExprVisitorMut>(
         Expr::Subquery(SubqueryExpr { expr, .. }) => walk_expr_mut(visitor, expr)?,
         Expr::Extension(Extension { expr }) => {
             let mut children = expr.children().to_vec();
+            let mut recurse = true;
             for child in &mut children {
                 if !walk_expr_mut(visitor, child)? {
-                    return Ok(false);
+                    recurse = false;
+                    break;
                 }
             }
             *expr = expr.with_new_children(children);
-            true
+            recurse
         }
         Expr::Call(call) => {
             for func_argument_expr in &mut call.args.args {
@@ -308,6 +310,7 @@ mod tests {
     struct LabelInjectorVisitor {
         label_name: String,
         label_value: String,
+        inject_once: bool,
     }
 
     impl ExprVisitorMut for LabelInjectorVisitor {
@@ -323,6 +326,10 @@ mod tests {
                         name: self.label_name.clone(),
                         value: self.label_value.clone(),
                     });
+
+                if self.inject_once {
+                    return Ok(false);
+                }
             }
             Ok(true)
         }
@@ -336,6 +343,7 @@ mod tests {
         let mut visitor = LabelInjectorVisitor {
             label_name: "namespace".to_string(),
             label_value: "injected".to_string(),
+            inject_once: false,
         };
 
         assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
@@ -358,6 +366,7 @@ mod tests {
         let mut visitor = LabelInjectorVisitor {
             label_name: "env".to_string(),
             label_value: "prod".to_string(),
+            inject_once: false,
         };
 
         assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
@@ -383,6 +392,7 @@ mod tests {
         let mut visitor = LabelInjectorVisitor {
             label_name: "env".to_string(),
             label_value: "prod".to_string(),
+            inject_once: false,
         };
 
         assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
@@ -447,6 +457,7 @@ mod tests {
         let mut visitor = LabelInjectorVisitor {
             label_name: "env".to_string(),
             label_value: "prod".to_string(),
+            inject_once: false,
         };
         assert!(walk_expr_mut(&mut visitor, &mut ast).unwrap());
 
@@ -460,6 +471,51 @@ mod tests {
                 assert_eq!(vs.matchers.matchers[0].value, "prod");
             } else {
                 panic!("expected inner expression to be a VectorSelector");
+            }
+        } else {
+            panic!("expected Extension expression");
+        }
+    }
+
+    #[test]
+    fn test_extension_partial_mutation_on_short_circuit() {
+        let child1 = parser::parse("metric_a{}").unwrap();
+        let child2 = parser::parse("metric_b{}").unwrap();
+
+        let dummy_ext = DummyExtension {
+            children: vec![child1, child2],
+        };
+
+        let mut ast = Expr::Extension(parser::Extension {
+            expr: std::sync::Arc::new(dummy_ext),
+        });
+
+        let mut visitor = LabelInjectorVisitor {
+            label_name: "env".to_string(),
+            label_value: "prod".to_string(),
+            inject_once: true,
+        };
+
+        // The walker returns Ok(false) because it short-circuits after mutating the first child.
+        assert_eq!(walk_expr_mut(&mut visitor, &mut ast), Ok(false));
+
+        if let Expr::Extension(ext) = &ast {
+            let children = ext.expr.children();
+            assert_eq!(children.len(), 2);
+
+            // The first child should have been mutated.
+            if let Expr::VectorSelector(vs) = &children[0] {
+                assert_eq!(vs.matchers.matchers.len(), 1);
+                assert_eq!(vs.matchers.matchers[0].name, "env");
+            } else {
+                panic!("expected first child to be a VectorSelector");
+            }
+
+            // The second child remains untouched.
+            if let Expr::VectorSelector(vs) = &children[1] {
+                assert!(vs.matchers.matchers.is_empty());
+            } else {
+                panic!("expected second child to be a VectorSelector");
             }
         } else {
             panic!("expected Extension expression");
