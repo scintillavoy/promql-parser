@@ -507,6 +507,7 @@ mod tests {
             if let Expr::VectorSelector(vs) = &children[0] {
                 assert_eq!(vs.matchers.matchers.len(), 1);
                 assert_eq!(vs.matchers.matchers[0].name, "env");
+                assert_eq!(vs.matchers.matchers[0].value, "prod");
             } else {
                 panic!("expected first child to be a VectorSelector");
             }
